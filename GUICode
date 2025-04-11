@@ -1,0 +1,224 @@
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local entitySpawnRequest = ReplicatedStorage:WaitForChild("EntitySpawnRequest")
+
+-- GUI setup
+local gui = script.Parent
+if gui:IsA("ScreenGui") then
+	gui.IgnoreGuiInset = true
+	gui.DisplayOrder = 1000
+	gui.ResetOnSpawn = false
+end
+
+local labelNames = {"1", "2", "3", "4", "5", "6"}
+local speciesList = {
+	[1] = "Jaguar", [2] = "Ocelot", [3] = "Capuchin",
+	[4] = "Armadillo", [5] = "Anteater", [6] = "Guess"
+}
+
+local currentIndex = 1
+local countDownTime = 3
+local countDown = countDownTime + 1
+local finalCountdown = countDownTime + 1
+local guessSelectionIndex = nil
+local instructionLabel = nil
+local hasReset = false
+
+local gamePhase = "normal"
+local selectedSpeciesCounts = {
+	Jaguar = 0, Ocelot = 0, Capuchin = 0, Armadillo = 0, Anteater = 0
+}
+
+-- GUI references
+local label6 = gui:FindFirstChild("6")
+local speciesListFrame = gui:FindFirstChild("SpeciesListFrame")
+local resultOverlay = gui:FindFirstChild("ResultOverlay")
+local resultBox = resultOverlay:FindFirstChild("ResultBox")
+local resultText = resultBox:FindFirstChild("ResultText")
+
+-- Create fade overlay
+local fade = gui:FindFirstChild("FadeOverlay")
+if not fade then
+	fade = Instance.new("Frame")
+	fade.Name = "FadeOverlay"
+	fade.Size = UDim2.new(1, 0, 1, 0)
+	fade.BackgroundColor3 = Color3.new(0, 0, 0)
+	fade.BackgroundTransparency = 1
+	fade.ZIndex = 100
+	fade.Visible = true
+	fade.Parent = gui
+end
+
+-- Stats popup (T key)
+local statsDisplay = Instance.new("TextLabel")
+statsDisplay.Name = "StatsPopup"
+statsDisplay.Size = UDim2.new(0.4, 0, 0.4, 0)
+statsDisplay.Position = UDim2.new(0.3, 0, 0.3, 0)
+statsDisplay.BackgroundTransparency = 0.2
+statsDisplay.BackgroundColor3 = Color3.new(0, 0, 0)
+statsDisplay.TextColor3 = Color3.new(1, 1, 1)
+statsDisplay.TextStrokeColor3 = Color3.new(0, 0, 0)
+statsDisplay.TextStrokeTransparency = 0.5
+statsDisplay.Font = Enum.Font.SpecialElite
+statsDisplay.TextScaled = true
+statsDisplay.Visible = false
+statsDisplay.ZIndex = 200
+statsDisplay.Parent = gui
+
+speciesListFrame.Visible = false
+resultOverlay.Visible = false
+fade.BackgroundTransparency = 1
+
+-- Show species guess UI
+local function showSpeciesList()
+	speciesListFrame:ClearAllChildren()
+	local layout = Instance.new("UIListLayout", speciesListFrame)
+	layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	layout.VerticalAlignment = Enum.VerticalAlignment.Center
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Padding = UDim.new(0, 6)
+
+	instructionLabel = Instance.new("TextLabel")
+	instructionLabel.Size = UDim2.new(1, -20, 0, 30)
+	instructionLabel.BackgroundTransparency = 1
+	instructionLabel.TextColor3 = Color3.new(1, 1, 1)
+	instructionLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
+	instructionLabel.TextStrokeTransparency = 0.5
+	instructionLabel.Font = Enum.Font.SpecialElite
+	instructionLabel.TextSize = 24
+	instructionLabel.Text = "Hover on a species to make your guess..."
+	instructionLabel.Parent = speciesListFrame
+
+	speciesListFrame.Visible = true
+	currentIndex = 3
+end
+
+-- Update labels
+local function updateHighlight()
+	local entities = workspace:FindFirstChild("Entities") and workspace.Entities:GetChildren() or {}
+	local popMap = {}
+	for _, e in ipairs(entities) do
+		popMap[e.Name] = (popMap[e.Name] or 0) + 1
+	end
+
+	for i, name in ipairs(labelNames) do
+		local label = gui:FindFirstChild(name)
+		if label then
+			local speciesName = speciesList[i]
+			if i ~= 6 then
+				label.Text = speciesName .. "\nPop: " .. tostring(popMap[speciesName] or 0)
+			end
+			label.TextSize = (i == currentIndex) and 30 or 20
+			label.TextStrokeColor3 = (i == currentIndex) and Color3.new(1, 1, 1) or Color3.new(0, 0, 0)
+		end
+	end
+end
+
+-- Input
+UserInputService.InputBegan:Connect(function(input, processed)
+	if processed then return end
+
+	if input.KeyCode == Enum.KeyCode.S then
+		currentIndex = math.max(1, currentIndex - 1)
+	elseif input.KeyCode == Enum.KeyCode.W then
+		currentIndex = math.min(#speciesList, currentIndex + 1)
+	elseif input.KeyCode == Enum.KeyCode.M and gamePhase == "normal" then
+		entitySpawnRequest:FireServer(speciesList[currentIndex])
+	elseif input.KeyCode == Enum.KeyCode.I and gamePhase == "normal" then
+		local species = speciesList[currentIndex]
+		local group = {}
+		for _, e in ipairs(workspace.Entities:GetChildren()) do
+			if e.Name == species then table.insert(group, e) end
+		end
+		if #group > 0 then group[math.random(1, #group)]:Destroy() end
+
+	elseif input.KeyCode == Enum.KeyCode.T then
+		local lines = {"Times Each Species Was Guessed:"}
+		for species, count in pairs(selectedSpeciesCounts) do
+			table.insert(lines, species .. ": " .. count)
+		end
+		statsDisplay.Text = table.concat(lines, "\n")
+		statsDisplay.Visible = true
+
+		task.delay(5, function()
+			statsDisplay.Visible = false
+		end)
+	end
+	updateHighlight()
+end)
+
+-- Initial highlight
+updateHighlight()
+
+-- Game loop
+task.spawn(function()
+	while true do
+		task.wait(1)
+		if gamePhase == "normal" then
+			if currentIndex == 6 then
+				countDown -= 1
+				label6.Text = "Make a Guess!\n(" .. tostring(math.max(countDown, 0)) .. ")"
+				if countDown <= 0 then
+					showSpeciesList()
+					gamePhase = "guess_phase"
+				end
+			else
+				label6.Text = "Make a Guess!"
+				countDown = countDownTime + 1
+			end
+		elseif gamePhase == "guess_phase" and currentIndex <= 5 then
+			gamePhase = "final_selection"
+			guessSelectionIndex = currentIndex
+			finalCountdown = countDownTime + 1
+		elseif gamePhase == "final_selection" then
+			if currentIndex ~= guessSelectionIndex then
+				finalCountdown = countDownTime + 3
+				guessSelectionIndex = currentIndex
+			else
+				finalCountdown -= 1
+				if instructionLabel then
+					instructionLabel.Text = "Hover on a species to make your guess... (" .. finalCountdown .. ")"
+				end
+				if finalCountdown <= 0 and not hasReset then
+					hasReset = true
+					local chosen = speciesList[currentIndex]
+					selectedSpeciesCounts[chosen] += 1
+					speciesListFrame.Visible = false
+					resultOverlay.Visible = true
+
+					local explanations = {
+						Jaguar = "Correct! Jaguars help keep nature balanced by hunting other animals.",
+						Ocelot = "Not quite! Ocelots are hunters but not top predators.",
+						Capuchin = "Nice try! Capuchins eat fruit and bugs but don’t control other species.",
+						Armadillo = "Almost! Armadillos dig and eat bugs but aren’t keystone species.",
+						Anteater = "Good guess! Anteaters eat insects but don’t shape the whole ecosystem.",
+					}
+
+					resultText.Text = explanations[chosen] or "That species is not a keystone predator."
+
+					task.delay(10, function()
+						local fadeIn = TweenService:Create(fade, TweenInfo.new(0.5), {BackgroundTransparency = 0})
+						fadeIn:Play()
+						fadeIn.Completed:Wait()
+
+						gamePhase = "normal"
+						currentIndex = 1
+						countDown = countDownTime + 1
+						resultOverlay.Visible = false
+						speciesListFrame.Visible = false
+						updateHighlight()
+						label6.Text = "Make a Guess!"
+
+						_G.ShowIntroAgain()
+						
+						fade:Destroy()
+						
+						hasReset = false
+					end)
+				end
+			end
+		end
+		updateHighlight()
+	end
+end)
