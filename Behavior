@@ -1,0 +1,316 @@
+-- Services
+local TweenService = game:GetService("TweenService")
+
+-- Core components
+local humanoid = script.Parent:FindFirstChild("Humanoid")
+local rootPart = script.Parent:FindFirstChild("HumanoidRootPart")
+
+-- Entity attributes
+local chainPosition = humanoid:GetAttribute("FoodChainPosition") or 0
+local restoreVal = humanoid:GetAttribute("RestoreValue") or 0
+local spriteFolder = script.Parent:FindFirstChild("Sprites")
+local spriteTarget = rootPart:FindFirstChild("Sprite")
+
+-- Movement and state tracking
+local maxDistance = 200
+local moving = false
+local wanderCooldown = 0
+local originalWalkSpeed = humanoid.WalkSpeed
+
+-- Avoidance and memory
+local lastAvoidDirection = nil
+
+-- Targeting and sprite animation
+local currentTarget = nil
+local targetLockTime = 0
+local targetStickDuration = 1
+local walkSpriteToggle = false
+local lastSpriteUpdate = 0
+local currentSprite = nil
+
+-- Fleeing logic
+local lastFleeTime = 0
+local fleeDirection = nil
+local fleeCooldown = 1.5 -- time to commit to flee direction
+local fleeing = false
+local fleeTargetPosition = nil
+
+-- Smooth walking speed transition
+local function tweenWalkSpeed(newSpeed, duration)
+	local tweenInfo = TweenInfo.new(duration or 0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	local goal = {WalkSpeed = newSpeed}
+	local tween = TweenService:Create(humanoid, tweenInfo, goal)
+	tween:Play()
+end
+
+-- Optional floating health GUI above the character
+local function setupHealthGui()
+	if rootPart:FindFirstChild("HealthGui") then return end
+
+	local billboard = Instance.new("BillboardGui")
+	billboard.Name = "HealthGui"
+	billboard.Size = UDim2.new(0, 60, 0, 20)
+	billboard.StudsOffset = Vector3.new(0, 4, 0)
+	billboard.Adornee = rootPart
+	billboard.AlwaysOnTop = true
+	billboard.Parent = rootPart
+
+	local healthLabel = Instance.new("TextLabel")
+	healthLabel.Name = "HealthLabel"
+	healthLabel.Size = UDim2.new(0.5, 0, 0.5, 0)
+	healthLabel.BackgroundTransparency = 1
+	healthLabel.TextColor3 = Color3.new(0.611765, 0.12549, 0.12549)
+	healthLabel.TextScaled = true
+	healthLabel.Font = Enum.Font.GothamBold
+	healthLabel.Text = "Health: 100%"
+	healthLabel.Parent = billboard
+end
+
+-- Dynamically update sprite based on movement speed
+local function updateSprite()
+	if not spriteFolder or not spriteTarget then return end
+
+	local speed = rootPart.Velocity.Magnitude
+	local currentTime = tick()
+
+	if speed < 2 then
+		-- Idle sprite
+		local idle = spriteFolder:FindFirstChild("Idle")
+		if idle and currentSprite ~= idle then
+			spriteTarget.Texture = idle.Texture
+			currentSprite = idle
+		end
+	else
+		-- Walking animation (toggle between frames)
+		local interval = 0.5
+		if currentTime - lastSpriteUpdate >= interval then
+			walkSpriteToggle = not walkSpriteToggle
+			local walkSprite = walkSpriteToggle and spriteFolder:FindFirstChild("Walk1") or spriteFolder:FindFirstChild("Walk2")
+			if walkSprite and currentSprite ~= walkSprite then
+				spriteTarget.Texture = walkSprite.Texture
+				currentSprite = walkSprite
+			end
+			lastSpriteUpdate = currentTime
+		end
+	end
+end
+
+-- Navigate toward a point while avoiding predators and obstacles
+local function raycastAvoidanceMove(targetPosition, predatorPositions)
+	local direction = (targetPosition - rootPart.Position).Unit
+	local rayOrigin = rootPart.Position + Vector3.new(0, 3, 0)
+
+	local raycastParams = RaycastParams.new()
+	raycastParams.FilterDescendantsInstances = {script.Parent}
+	raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+
+	local directHit = workspace:Raycast(rayOrigin, direction * 20, raycastParams)
+	if not directHit and (not predatorPositions or #predatorPositions == 0) then
+		humanoid:MoveTo(targetPosition)
+		lastAvoidDirection = direction
+		return
+	end
+
+	-- Sample directions to find best escape/movement path
+	local angles = {-90, -70, -50, -40, -30, -20, 0, 20, 30, 40, 50, 70, 90}
+	local bestDirection = direction
+	local bestScore = -math.huge
+
+	for _, angle in ipairs(angles) do
+		local rotatedDirection = (CFrame.Angles(0, math.rad(angle), 0) * CFrame.new(direction)).Position.Unit
+		local castVector = rotatedDirection * 30
+		local result = workspace:Raycast(rayOrigin, castVector, raycastParams)
+		local distanceToWall = result and (result.Position - rayOrigin).Magnitude or 30
+
+		local predatorRepulsion = 0
+		if predatorPositions then
+			for _, pos in ipairs(predatorPositions) do
+				local awayVector = (rayOrigin - pos).Unit
+				predatorRepulsion += rotatedDirection:Dot(awayVector)
+			end
+		end
+
+		local score = distanceToWall + predatorRepulsion * 15
+
+		-- Discourage going backward
+		if lastAvoidDirection and rotatedDirection:Dot(-lastAvoidDirection) > 0.8 then
+			score -= 10
+		end
+
+		if score > bestScore then
+			bestScore = score
+			bestDirection = rotatedDirection
+		end
+	end
+
+	humanoid:MoveTo(rootPart.Position + bestDirection * 10)
+	lastAvoidDirection = bestDirection
+end
+
+-- Red fade-out effect for entity death and destroy
+local function fadeToRedAndDestroy(entity)
+	local tweenInfo = TweenInfo.new(1.5, Enum.EasingStyle.Linear, Enum.EasingDirection.Out)
+	for _, part in ipairs(entity:GetDescendants()) do
+		if part:IsA("BasePart") then
+			local tweenGoal = {Color = Color3.new(1, 0, 0)}
+			local tween = TweenService:Create(part, tweenInfo, tweenGoal)
+			tween:Play()
+		end
+	end
+	task.delay(1.5, function()
+		if entity and entity.Parent then
+			entity:Destroy()
+		end
+	end)
+end
+
+-- Calculate flee direction based on all nearby predators
+local function fleeFromPredator(predatorPositions)
+	if not predatorPositions or #predatorPositions == 0 then return nil end
+
+	local currentTime = tick()
+
+	-- Commit to flee direction if still within cooldown
+	if fleeDirection and currentTime - lastFleeTime < fleeCooldown then
+		return fleeDirection
+	end
+
+	local fleeVector = Vector3.zero
+	for _, predatorPos in ipairs(predatorPositions) do
+		fleeVector += (rootPart.Position - predatorPos).Unit
+	end
+
+	if fleeVector.Magnitude == 0 then return nil end
+
+	-- Add slight randomness
+	local randAngle = math.rad(math.random(-25, 25))
+	local adjustedFlee = (CFrame.Angles(0, randAngle, 0) * CFrame.new(fleeVector.Unit)).Position.Unit
+
+	fleeDirection = adjustedFlee
+	lastFleeTime = currentTime
+	return fleeDirection
+end
+
+-- MAIN LOOP --
+while humanoid.Health > 0 do
+	-- If fleeing, keep moving toward flee target
+	if fleeing and fleeTargetPosition then
+		local distToTarget = (rootPart.Position - fleeTargetPosition).Magnitude
+		if distToTarget <= 5 then
+			fleeing = false
+			fleeTargetPosition = nil
+		else
+			raycastAvoidanceMove(fleeTargetPosition, predatorPositions)
+			updateSprite()
+			task.wait(0.1)
+			continue
+		end
+	end
+
+	-- Scan surroundings
+	local currentPosition = rootPart.Position
+	local closestDistance = maxDistance
+	local closestObj = nil
+	local closestIsPrey = false
+	local predatorPositions = {}
+	local highestDanger = 0
+
+	for _, obj in ipairs(workspace.Entities:GetChildren()) do
+		if obj:IsA("Model") and obj ~= script.Parent and obj:FindFirstChild("Humanoid") and obj.PrimaryPart then
+			local targetHum = obj:FindFirstChild("Humanoid")
+			local targetChain = targetHum:GetAttribute("FoodChainPosition")
+			local isPredator = targetChain and targetChain > chainPosition
+			local dist = (obj.PrimaryPart.Position - currentPosition).Magnitude
+
+			-- Danger rating
+			if isPredator then
+				if dist <= 20 then
+					highestDanger = 3
+				elseif dist <= 50 then
+					highestDanger = math.max(highestDanger, 1 / dist)
+				end
+				table.insert(predatorPositions, obj.PrimaryPart.Position)
+			end
+		end
+	end
+
+	-- Update health display
+	local gui = rootPart:FindFirstChild("HealthGui")
+	if gui then
+		local healthLabel = gui:FindFirstChild("HealthLabel")
+		if healthLabel then
+			healthLabel.Text = string.format("Health: %.0f%%", (humanoid.Health / humanoid.MaxHealth) * 100)
+		end
+	end
+
+	-- Flee if danger is high
+	if highestDanger >= 3 and not fleeing then
+		tweenWalkSpeed(originalWalkSpeed * 1.5, 0.5)
+		local fleeDir = fleeFromPredator(predatorPositions)
+		if fleeDir then
+			fleeTargetPosition = rootPart.Position + fleeDir * 50
+			fleeing = true
+			raycastAvoidanceMove(fleeTargetPosition, predatorPositions)
+			updateSprite()
+			task.wait(0.1)
+			continue
+		end
+	else
+		tweenWalkSpeed(originalWalkSpeed, 0.5)
+
+		-- Look for closest prey
+		for _, obj in ipairs(workspace.Entities:GetChildren()) do
+			if obj:IsA("Model") and obj ~= script.Parent and obj:FindFirstChild("Humanoid") and obj.PrimaryPart then
+				local targetHumanoid = obj:FindFirstChild("Humanoid")
+				local targetChain = targetHumanoid:GetAttribute("FoodChainPosition")
+				if targetChain then
+					local mySize = rootPart.Size.Magnitude
+					local theirSize = obj.PrimaryPart.Size.Magnitude
+					local dist = (obj.PrimaryPart.Position - currentPosition).Magnitude
+					local isPrey = (chainPosition - targetChain >= 1)
+					if isPrey and dist < closestDistance then
+						closestObj = obj
+						closestDistance = dist
+						closestIsPrey = true
+					end
+				end
+			end
+		end
+	end
+
+	-- Move toward closest prey
+	if closestObj and closestObj.PrimaryPart then
+		raycastAvoidanceMove(closestObj.PrimaryPart.Position)
+	end
+
+	-- Attack if within striking distance
+	if closestObj and closestObj.PrimaryPart then
+		local mySize = rootPart.Size.Magnitude
+		local theirSize = closestObj.PrimaryPart.Size.Magnitude
+		local buffer = 2 + mySize
+		if closestDistance <= buffer and closestIsPrey then
+			local targetHumanoid = closestObj:FindFirstChild("Humanoid")
+			if targetHumanoid then
+				targetHumanoid:TakeDamage(100)
+				fadeToRedAndDestroy(closestObj)
+				currentTarget = nil
+				wait(0.5)
+				targetLockTime = 0
+				local restore = targetHumanoid:GetAttribute("RestoreValue") or 100
+				humanoid.Health = math.min(humanoid.MaxHealth, humanoid.Health + restore)
+			end
+		end
+	end
+
+	-- Gradual health drain (simulating ecosystem stress)
+	humanoid:TakeDamage(1)
+
+	-- Frame delay
+	task.wait(0.1)
+	updateSprite()
+end
+
+-- Cleanup on death
+if humanoid.Health <= 0 then
+	fadeToRedAndDestroy(humanoid.Parent)
+end
