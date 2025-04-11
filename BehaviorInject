@@ -1,0 +1,33 @@
+-- ServerScriptService.InjectBehavior.lua
+
+local ServerStorage = game:GetService("ServerStorage")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local EntitiesFolder = ReplicatedStorage:WaitForChild("Entities")
+local BehaviorScript = ServerStorage:WaitForChild("Behavior") -- This should be a ModuleScript or Script named "Behavior"
+
+-- Function to inject behavior script into entity if not already present
+local function injectBehavior(entity)
+	if entity:IsA("Model") and entity:FindFirstChild("Humanoid") and entity.PrimaryPart then
+		if not entity:FindFirstChild("Behavior") then
+			local newScript = BehaviorScript:Clone()
+			newScript.Name = "Behavior"
+			newScript.Parent = entity
+			newScript.Disabled = false
+		end
+	end
+end
+
+-- Inject behavior into all existing entities
+for _, entity in ipairs(EntitiesFolder:GetChildren()) do
+	injectBehavior(entity)
+end
+
+-- Listen for future entity spawns
+EntitiesFolder.ChildAdded:Connect(function(child)
+	-- Wait for PrimaryPart and Humanoid to fully load
+	child:WaitForChild("Humanoid", 3)
+	child:WaitForChild("HumanoidRootPart", 3)
+	task.wait(0.1)
+	injectBehavior(child)
+end)
