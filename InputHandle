@@ -1,0 +1,120 @@
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Lighting = game:GetService("Lighting")
+local entityFolder = ReplicatedStorage:WaitForChild("Entities")
+
+local workspaceFolder = workspace:FindFirstChild("Entities") or Instance.new("Folder", workspace)
+workspaceFolder.Name = "Entities"
+
+local spawnAreaCenter = Vector3.new(0, 0, 0)
+local areaWidth, areaLength = 80, 80
+
+-- State for detecting W+S combo presses
+local recentCombos = 0
+local comboResetTime = 5
+local lastComboTime = 0
+local wPressed = false
+local sPressed = false
+
+-- Get random position in area
+local function getRandomSpawnPosition()
+	local x = spawnAreaCenter.X + math.random(-areaWidth / 2, areaWidth / 2)
+	local z = spawnAreaCenter.Z + math.random(-areaLength / 2, areaLength / 2)
+	return Vector3.new(x, spawnAreaCenter.Y + 3, z)
+end
+
+-- Spawn one entity
+local function spawnRandomEntity()
+	local models = entityFolder:GetChildren()
+	if #models == 0 then
+		warn("No models found in Entities folder")
+		return
+	end
+
+	local pick = models[math.random(1, #models)]
+	local clone = pick:Clone()
+	clone:SetPrimaryPartCFrame(CFrame.new(getRandomSpawnPosition()))
+	clone.PrimaryPart.Anchored = false
+	clone.Parent = workspaceFolder
+	print("Spawned:", clone.Name)
+end
+
+-- Destroy all entities
+local function clearEntities()
+	for _, entity in ipairs(workspaceFolder:GetChildren()) do
+		entity:Destroy()
+	end
+	print("All entities cleared.")
+end
+
+-- Run full spawn
+local function initialSpawn()
+	for _, model in ipairs(entityFolder:GetChildren()) do
+		local count = math.random(3, 6)
+		for i = 1, count do
+			local clone = model:Clone()
+			if clone.PrimaryPart then
+				clone:SetPrimaryPartCFrame(CFrame.new(getRandomSpawnPosition()))
+				clone.PrimaryPart.Anchored = false
+				clone.Parent = workspaceFolder
+			end
+		end
+	end
+	print("Initial spawn completed.")
+end
+
+-- Called when W+S is pressed together
+local function registerCombo()
+	local now = tick()
+	if now - lastComboTime > comboResetTime then
+		recentCombos = 0 -- reset if too slow
+	end
+
+	recentCombos += 1
+	lastComboTime = now
+
+	print("W+S combo pressed", recentCombos, "time(s)")
+	if recentCombos >= 3 then
+		print("Triggering simulation reset!")
+		recentCombos = 0
+		clearEntities()
+		task.wait(1)
+		initialSpawn()
+	end
+end
+
+-- Input handling
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed then return end
+
+	local key = input.KeyCode
+	if key == Enum.KeyCode.W then
+		wPressed = true
+	elseif key == Enum.KeyCode.S then
+		sPressed = true
+	elseif key == Enum.KeyCode.M then
+		spawnRandomEntity()
+	elseif key == Enum.KeyCode.I then
+		local entities = workspaceFolder:GetChildren()
+		if #entities > 0 then
+			local toRemove = entities[math.random(1, #entities)]
+			print("Removed:", toRemove.Name)
+			toRemove:Destroy()
+		else
+			print("No entities to remove")
+		end
+	end
+		-- Check for W+S combo trigger
+	if wPressed and sPressed then
+		registerCombo()
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	local key = input.KeyCode
+	if key == Enum.KeyCode.W then
+		wPressed = false
+	elseif key == Enum.KeyCode.S then
+		sPressed = false
+	end
+end)
