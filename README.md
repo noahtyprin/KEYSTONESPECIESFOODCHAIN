@@ -16,5 +16,3 @@ Manages the population and spawns entities accordingly
 
 # InputHandle
 Handles all controller inputs
-
-# Introductive
