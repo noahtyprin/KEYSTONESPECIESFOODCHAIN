@@ -1,0 +1,127 @@
+-- DynamicSpawner
+-- Spawns more common entities at lower food chain levels, and rarer ones higher up
+
+local ServerStorage = game:GetService("ServerStorage")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local entityFolder = ReplicatedStorage:WaitForChild("Entities")
+local workspaceFolder = workspace:FindFirstChild("Entities") or Instance.new("Folder", workspace)
+workspaceFolder.Name = "Entities"
+
+local EntitySpawnRequest = ReplicatedStorage.EntitySpawnRequest
+local spawnAreaCenter = Vector3.new(0, 4, 0)
+local areaWidth, areaLength = 100, 100
+local maxChainPosition = 10
+local checkInterval = 2.5 -- seconds
+local maxTotalEntities = 200
+
+local populationTargets = {
+	["Jaguar"] = 2,
+	["Ocelot"] = 4,
+	["Capuchin"] = 6,
+	["Armadillo"] = 7,
+	["Anteater"] = 10,
+}
+
+local function getRandomSpawnPosition()
+	local x = spawnAreaCenter.X + math.random(-areaWidth / 2, areaWidth / 2)
+	local z = spawnAreaCenter.Z + math.random(-areaLength / 2, areaLength / 2)
+	return Vector3.new(x, spawnAreaCenter.Y, z)
+end
+
+local function spawnEntity(modelTemplate)
+	if not modelTemplate then return end
+	local spawnPos = getRandomSpawnPosition() + Vector3.new(0, 3, 0)
+	local clone = modelTemplate:Clone()
+	if not clone.PrimaryPart then
+		warn("[DynamicSpawner]: Missing PrimaryPart in model", clone.Name)
+		return
+	end
+	clone:SetPrimaryPartCFrame(CFrame.new(spawnPos))
+	clone.PrimaryPart.Anchored = false
+
+	local hum = clone:FindFirstChildWhichIsA("Humanoid")
+	if hum then
+		hum.Health = hum.MaxHealth
+		hum:SetAttribute("Hunger", 0.1)
+		hum:SetAttribute("Energy", 1.0)
+		hum:SetAttribute("SpawnedTime", os.clock())
+		task.delay(3, function()
+			if hum and hum.Health < hum.MaxHealth * 0.5 then
+				warn("[DynamicSpawner]: Entity died early -", clone.Name)
+			end
+		end)
+	end
+	clone.Parent = workspaceFolder
+end
+
+-- Initial population spawn
+task.wait(2)
+for _, entityModel in ipairs(entityFolder:GetChildren()) do
+	local chainPosition = entityModel:GetAttribute("FoodChainPosition") or 0
+	local scale = 1 - (chainPosition / maxChainPosition) -- 1.0 for base, down to 0
+	local speciesName = entityModel.Name
+	local spawnCount = populationTargets[speciesName]
+
+	local basePosition = getRandomSpawnPosition()
+	for i = 1, spawnCount do
+		local offset = Vector3.new(math.random(-5, 5), 0, math.random(-5, 5)) * 3
+		local clone = entityModel:Clone()
+		if not clone.PrimaryPart then
+			warn("[DynamicSpawner]: Missing PrimaryPart in model", clone.Name)
+		else
+			clone:SetPrimaryPartCFrame(CFrame.new(basePosition + offset))
+			clone.PrimaryPart.Anchored = false
+			clone.Parent = workspaceFolder
+		end
+	end
+end
+
+print("[DynamicSpawner]: Initial entities spawned.")
+
+-- Player spawn request
+EntitySpawnRequest.OnServerEvent:Connect(function(player, speciesName)
+	if not speciesName then return end
+	local model = entityFolder:FindFirstChild(speciesName)
+	if model then
+		spawnEntity(model)
+	else
+		warn("[DynamicSpawner]: No such species to spawn -", speciesName)
+	end
+end)
+
+-- Periodic ecosystem balance check
+task.spawn(function()
+	while true do
+		task.wait(checkInterval)
+		local currentCount = #workspaceFolder:GetChildren()
+		if currentCount < maxTotalEntities then
+			for _, entityModel in ipairs(entityFolder:GetChildren()) do
+				local speciesName = entityModel.Name
+				local target = populationTargets[speciesName]
+
+				if target then
+					-- Count how many of this species exist currently
+					local count = 0
+					for _, existing in ipairs(workspaceFolder:GetChildren()) do
+						if existing.Name == speciesName then
+							count += 1
+						end
+					end
+
+					if count < target then
+						local chainPosition = entityModel:GetAttribute("FoodChainPosition") or 0
+						local spawnChance = math.clamp(1 - (chainPosition / maxChainPosition), 0.1, 1.0)
+
+						if math.random() < spawnChance then
+							spawnEntity(entityModel)
+							print(string.format("[DynamicSpawner]: Replenished %s (Now %d / Target %d)", speciesName, count + 1, target))
+						end
+					end
+				else
+					warn("[DynamicSpawner]: No population target for", speciesName)
+				end
+			end
+		end
+	end
+end)
+
